@@ -5,10 +5,19 @@ const myDB = require('./connection');
 const fccTesting = require('./freeCodeCamp/fcctesting.js');
 const session = require('express-session');
 const passport = require('passport');
-const routes = require('./routes.js'); 
-const auth = require('./auth.js'); 
+const routes = require('./routes');
+const auth = require('./auth.js');
 
 const app = express();
+const http = require('http').createServer(app);
+const io = require('socket.io')(http);
+
+const passportSocketIo = require("passport.socketio");
+const MongoStore = require('connect-mongo')(session);
+const cookieParser = require("cookie-parser");
+const URI = process.env.MONGO_URI;
+const store = new MongoStore({ url: URI });
+
 app.set('view engine', 'pug');
 
 fccTesting(app); // For fCC testing purposes
@@ -20,7 +29,9 @@ app.use(session({
   secret: process.env.SESSION_SECRET,
   resave: true,
   saveUninitialized: true,
-  cookie: { secure: false }
+  cookie: { secure: false },
+  key: 'express.sid',
+  store: store
 }));
 
 app.use(passport.initialize());
@@ -32,6 +43,41 @@ myDB(async (client) => {
   routes(app, myDataBase);
   auth(app, myDataBase);
 
+  io.use(
+    passportSocketIo.authorize({
+      cookieParser: cookieParser,
+      key: 'express.sid',
+      secret: process.env.SESSION_SECRET,
+      store: store,
+      success: onAuthorizeSuccess,
+      fail: onAuthorizeFail
+    })
+  );
+
+
+  let currentUsers = 0;
+  io.on('connection', (socket) => {
+    ++currentUsers;
+    io.emit('user', {
+      name: socket.request.user.name,
+      currentUsers,
+      connected: true
+    });        
+    console.log('user ' + socket.request.user.name + ' connected');
+    
+    socket.on('chat message', (message) => {
+      io.emit('chat message', { name: socket.request.user.name, message });
+    });
+
+    io.emit('user count', currentUsers);
+    console.log('A user has connected');
+
+    socket.on('disconnect', () => {
+      console.log('A user has disconnected');
+      --currentUsers;
+      io.emit('user count', currentUsers);
+    });
+  });
 }).catch((e) => {
   app.route('/').get((req, res) => {
     res.render('pug', { title: e, message: 'Unable to login' });
@@ -39,9 +85,18 @@ myDB(async (client) => {
 });
 
 
+function onAuthorizeSuccess(data, accept) {
+  console.log('successful connection to socket.io');
 
-// app.listen out here...
+  accept(null, true);
+}
 
-app.listen(process.env.PORT || 3000, () => {
+function onAuthorizeFail(data, message, error, accept) {
+  if (error) throw new Error(message);
+  console.log('failed connection to socket.io:', message);
+  accept(null, false);
+}
+
+http.listen(process.env.PORT || 3000, () => {
   console.log('Listening on port ' + process.env.PORT);
 });
